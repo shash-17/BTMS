@@ -1,0 +1,104 @@
+version: "3.9"
+
+networks:
+  btms-net:
+    driver: bridge
+
+services:
+  # ─────────────────────────────────────────────
+  # Phase 1: Message Broker
+  # ─────────────────────────────────────────────
+  message-broker:
+    image: redis:alpine
+    container_name: message-broker
+    ports:
+      - "6379:6379"
+    networks:
+      - btms-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ─────────────────────────────────────────────  # ─────────────────────────────────────────────
+  # Authentication & User Management (FastAPI + SQLite)
+  # ─────────────────────────────────────────────
+  auth-service:
+    build: ./auth_service
+    container_name: auth-service
+    ports:
+      - "9000:9000"
+    networks:
+      - btms-net
+    volumes:
+      - auth-data:/data
+    environment:
+      - DB_PATH=/data/btms_users.db
+      - JWT_SECRET=btms-super-secret-key-change-in-prod-2026
+
+  # Phase 3: Data Ingestion Service (Flask)
+  # ─────────────────────────────────────────────
+  ingestion-service:
+    build: ./ingestion
+    container_name: ingestion-service
+    ports:
+      - "5001:5000"  # 5000 is taken by macOS AirPlay Receiver
+    networks:
+      - btms-net
+    depends_on:
+      message-broker:
+        condition: service_healthy
+    environment:
+      - REDIS_HOST=message-broker
+      - REDIS_PORT=6379
+
+  # ─────────────────────────────────────────────
+  # Phase 4: AI Optimization Engine (FastAPI)
+  # ─────────────────────────────────────────────
+  ai-engine:
+    build: ./ai_engine
+    container_name: ai-engine
+    ports:
+      - "8000:8000"
+    networks:
+      - btms-net
+    depends_on:
+      message-broker:
+        condition: service_healthy
+    environment:
+      - REDIS_HOST=message-broker
+      - REDIS_PORT=6379
+
+  # ─────────────────────────────────────────────
+  # Phase 2: Sensor Simulation Engine
+  # ─────────────────────────────────────────────
+  simulator:
+    build: ./simulator
+    container_name: simulator
+    networks:
+      - btms-net
+    depends_on:
+      - ingestion-service
+    environment:
+      - INGESTION_URL=http://ingestion-service:5000/telemetry  # internal Docker port stays 5000
+
+  # ─────────────────────────────────────────────
+  # Phase 5: React Digital Twin Dashboard
+  # ─────────────────────────────────────────────
+  dashboard:
+    build:
+      context: ./dashboard
+      args:
+        VITE_AI_ENGINE_URL: ""   # empty = use /api prefix proxied by Nginx
+    container_name: dashboard
+    ports:
+      - "3000:80"
+    networks:
+      - btms-net
+    depends_on:
+      - ai-engine
+      - auth-service
+
+volumes:
+  auth-data:
