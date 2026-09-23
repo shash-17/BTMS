@@ -71,6 +71,11 @@ export default function DashboardPage() {
   const [elapsed, setElapsed] = useState(0);
   const [profileOpen, setProfileOpen] = useState(false);
   const [selectedCell, setSelectedCell] = useState(null);
+  // Keep a ref in sync so fetchData can read current value without being a dep
+  const _setSelectedCell = (val) => {
+    selectedCellRef.current = val;
+    setSelectedCell(val);
+  };
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [events, setEvents] = useState([]);
 
@@ -79,6 +84,7 @@ export default function DashboardPage() {
   const cellHistoryRef = useRef(new Map());
   const [cellHistory, setCellHistory] = useState(new Map());
   const eventLogRef = useRef(null);
+  const selectedCellRef = useRef(null);
 
   // Tracking refs for toast/event deduplication
   const prevConnected = useRef(null);
@@ -162,9 +168,9 @@ export default function DashboardPage() {
         cellHistoryRef.current = map;
         setCellHistory(new Map(map));
 
-        // Update selected cell if modal open
-        if (selectedCell !== null) {
-          const updated = newCells.find((c) => c.cell_id === selectedCell.cell_id);
+        // Update selected cell if modal open (read from ref — no dep needed)
+        if (selectedCellRef.current !== null) {
+          const updated = newCells.find((c) => c.cell_id === selectedCellRef.current.cell_id);
           if (updated) setSelectedCell(updated);
         }
 
@@ -211,7 +217,7 @@ export default function DashboardPage() {
       }
       prevConnected.current = false;
     }
-  }, [addToast, pushEvent, selectedCell]);
+  }, [addToast, pushEvent]);
 
   useEffect(() => {
     fetchData();
@@ -353,7 +359,7 @@ export default function DashboardPage() {
 
         {/* Left column: cell grid + trend chart */}
         <div className="cell-grid-col">
-          <CellGrid cells={cells} cellHistory={cellHistory} tick={tick} onSelectCell={setSelectedCell} />
+          <CellGrid cells={cells} cellHistory={cellHistory} tick={tick} onSelectCell={_setSelectedCell} />
           <PackTrendChart history={history} />
 
           {/* Event Timeline — beneath chart */}
@@ -399,7 +405,7 @@ export default function DashboardPage() {
         <CellDetailModal
           cell={selectedCell}
           sparkData={cellHistory.get(selectedCell.cell_id) || []}
-          onClose={() => setSelectedCell(null)}
+          onClose={() => _setSelectedCell(null)}
         />
       )}
     </div>

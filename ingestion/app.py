@@ -10,6 +10,11 @@ import os
 import json
 import logging
 from flask import Flask, request, jsonify
+try:
+    from flask_cors import CORS
+    HAS_CORS = True
+except ImportError:
+    HAS_CORS = False
 import redis
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
@@ -21,6 +26,8 @@ logger = logging.getLogger(__name__)
 
 # ─── App & Redis ──────────────────────────────────────────────────────────────
 app = Flask(__name__)
+if HAS_CORS:
+    CORS(app)
 
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
@@ -30,7 +37,13 @@ QUEUE_NAME = "battery_stream"
 TEMP_MIN = 0.0
 TEMP_MAX = 60.0
 
-redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+redis_client = redis.Redis(
+    host=REDIS_HOST,
+    port=REDIS_PORT,
+    decode_responses=True,
+    socket_connect_timeout=0.5,
+    socket_timeout=0.5
+)
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -48,6 +61,13 @@ def enrich_payload(payload: dict) -> dict:
 
 
 # ─── Routes ───────────────────────────────────────────────────────────────────
+
+@app.after_request
+def add_cors_headers(response):
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Headers"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    return response
 
 @app.route("/health", methods=["GET"])
 def health():

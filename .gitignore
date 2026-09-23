@@ -12,6 +12,8 @@ __pycache__/
 .venv/
 venv/
 *.pyc
+.pytest_cache/
+*/.pytest_cache/
 
 # Databases (don't commit SQLite DBs)
 *.db

@@ -1,9 +1,9 @@
 """
 BTMS Local Dev Server — All-in-one (no Redis, no Docker needed)
 ─────────────────────────────────────────────────────────────────
-Runs the simulator + AI engine in a single process.
+Runs the simulator + ML anomaly detector + AI engine in a single process.
 Serves FastAPI on port 8000 so the Vite dashboard at localhost:5174
-gets live telemetry and recommendations immediately.
+gets live telemetry, ML anomaly scores, and recommendations immediately.
 
 Run:
     python3 dev_server.py
@@ -11,9 +11,15 @@ Run:
 
 import math
 import random
+import sys
+import os
 import threading
 import time
 from datetime import datetime
+
+# Make ai_engine importable
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "ai_engine"))
+from anomaly_detector import BTMSAnomalyDetector
 
 import uvicorn
 from fastapi import FastAPI
@@ -37,10 +43,16 @@ SPIKE_PROBABILITY = 0.15
 soc = [100.0] * NUM_CELLS
 tick_counter = 0
 
+# ─── ML Anomaly Detector ──────────────────────────────────────────────────────
+print("⏳  Bootstrapping IsolationForest anomaly detector...", flush=True)
+detector = BTMSAnomalyDetector()
+print(f"✓  ML model ready ({detector._bootstrap_n} bootstrap samples)", flush=True)
+
 # ─── Shared state ─────────────────────────────────────────────────────────────
 state_lock = threading.Lock()
 latest_telemetry = None
 latest_recommendation = None
+latest_anomaly = None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -91,16 +103,19 @@ def compute_nusselt(re, pr):
     return round(3.66 + (0.065 * gz) / (1 + 0.04 * gz ** (2 / 3)), 3)
 
 
-def cfd_optimise(cells):
+def cfd_optimise(cells, ml_severity="normal"):
     temps = [c["temperature"] for c in cells]
     max_temp = max(temps)
     avg_temp = sum(temps) / len(temps)
     delta_t = max(temps) - min(temps)
-    spike_cells = [c["cell_id"] for c in cells if c["temperature"] > TEMP_CRITICAL]
+    hw_spike_cells = [c["cell_id"] for c in cells if c["temperature"] > TEMP_CRITICAL]
 
-    if spike_cells:
+    # ML severity drives the decision (hardware spikes always override)
+    if hw_spike_cells:
         re_target, severity, conc_key = RE_TARGET_SPIKE, "critical", "high"
-    elif max_temp > 40.0 or delta_t > 4.0:
+    elif ml_severity == "critical":
+        re_target, severity, conc_key = RE_TARGET_SPIKE, "critical", "high"
+    elif ml_severity == "warning":
         re_target, severity, conc_key = RE_TARGET_NORMAL + 100.0, "warning", "medium"
     else:
         re_target, severity, conc_key = RE_TARGET_NORMAL, "normal", "low"
@@ -118,7 +133,8 @@ def cfd_optimise(cells):
 
     return {
         "severity": severity,
-        "spike_cells": spike_cells,
+        "ml_driven": True,
+        "spike_cells": hw_spike_cells,
         "max_temp": round(max_temp, 2),
         "avg_temp": round(avg_temp, 2),
         "delta_t": round(delta_t, 2),
@@ -141,7 +157,7 @@ def cfd_optimise(cells):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def simulation_worker():
-    global tick_counter, latest_telemetry, latest_recommendation
+    global tick_counter, latest_telemetry, latest_recommendation, latest_anomaly
     print("▶  Simulation worker started — generating telemetry every 1 s", flush=True)
     while True:
         cells = [simulate_cell(i) for i in range(NUM_CELLS)]
@@ -151,16 +167,30 @@ def simulation_worker():
             "pack_id": "BTMS-PACK-001",
             "cells": cells,
         }
-        rec = cfd_optimise(cells)
+
+        # ── ML anomaly detection ───────────────────────────────────────────────────
+        detector.ingest(cells)
+        anomaly_result = detector.detect(cells)
+        ml_severity = anomaly_result.get("pack_severity", "normal")
+
+        # ── CFD optimisation (ML-driven) ───────────────────────────────────────────
+        rec = cfd_optimise(cells, ml_severity=ml_severity)
+
         with state_lock:
             latest_telemetry = payload
             latest_recommendation = rec
+            latest_anomaly = anomaly_result
 
+        # ── Console log ────────────────────────────────────────────────────────────────
+        n_anom = len(anomaly_result.get("anomalous_cells", []))
+        conf   = anomaly_result.get("pack_confidence", 0)
         spike_ids = [c["cell_id"] for c in cells if c["is_spike"]]
         if spike_ids:
-            print(f"  [Tick {tick_counter:04d}] ⚠ SPIKE cells {spike_ids} | Re={rec['target_re']:.0f} | Al₂O₃={rec['al2o3_vol_percent']}%", flush=True)
+            print(f"  [Tick {tick_counter:04d}] ⚠ SPIKE {spike_ids} | ML={ml_severity} conf={conf:.2f} | Re={rec['target_re']:.0f} | Al₂O₃={rec['al2o3_vol_percent']}%", flush=True)
+        elif n_anom:
+            print(f"  [Tick {tick_counter:04d}] 🔴 ML-ANOMALY cells={anomaly_result['anomalous_cells']} conf={conf:.2f} | {ml_severity}", flush=True)
         else:
-            print(f"  [Tick {tick_counter:04d}] Tmax={rec['max_temp']}°C ΔT={rec['delta_t']}°C | {rec['severity']}", flush=True)
+            print(f"  [Tick {tick_counter:04d}] ✔ Tmax={rec['max_temp']}°C ΔT={rec['delta_t']}°C | ML={ml_severity} conf={conf:.2f}", flush=True)
 
         tick_counter += 1
         time.sleep(1.0)
@@ -205,6 +235,20 @@ def get_latest_telemetry():
         if latest_telemetry is None:
             return {"status": "waiting", "message": "No telemetry yet"}
         return {"status": "ok", "telemetry": latest_telemetry}
+
+
+@app.get("/anomaly")
+def get_anomaly():
+    with state_lock:
+        if latest_anomaly is None:
+            return {"status": "waiting", "message": "No telemetry yet",
+                    "model": detector.status()}
+        return {"status": "ok", "anomaly": latest_anomaly, "model": detector.status()}
+
+
+@app.get("/anomaly/model")
+def get_model_status():
+    return {"status": "ok", "model": detector.status()}
 
 
 if __name__ == "__main__":

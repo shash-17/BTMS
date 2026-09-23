@@ -37,8 +37,8 @@ const SERVICES = [
   {
     id: "dashboard",
     name: "Dashboard",
-    port: 5174,
-    url: "http://localhost:5174",
+    port: typeof window !== "undefined" ? window.location.port || 5173 : 5173,
+    url: typeof window !== "undefined" ? window.location.origin : "http://localhost:5173",
     tag: "REACT+THREE",
     desc: "Digital twin UI",
   },
@@ -70,6 +70,9 @@ function LatencyBar({ latency }) {
 }
 
 async function pingService(service) {
+  if (service.id === "dashboard") {
+    return { status: "up", latency: 1 };
+  }
   if (!service.url) return { status: "unknown", latency: null };
   const t0 = performance.now();
   try {
